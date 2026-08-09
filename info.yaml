@@ -16,5 +16,5 @@ project:
   team: "XLR8"  
   discord: "gotawa_aryo"
   description: "Single-chip USB-to-audio interface system consisting of USB interface (UAC 1.0) standard and DAC audio output."
-  lvs_config: "config.json"
+  lvs_config: "src/config.json"
 
