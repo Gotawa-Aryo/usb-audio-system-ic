@@ -1,0 +1,83 @@
+library (ic_top_usb_audio) {
+  comment                        : "";
+  delay_model                    : table_lookup;
+  simulation                     : false;
+  capacitive_load_unit (1,pF);
+  leakage_power_unit             : 1pW;
+  current_unit                   : "1mA";
+  pulling_resistance_unit        : "1ohm";
+  time_unit                      : "1ns";
+  voltage_unit                   : "1v";
+  library_features(report_delay_calculation);
+
+  input_threshold_pct_rise : 50;
+  input_threshold_pct_fall : 50;
+  output_threshold_pct_rise : 50;
+  output_threshold_pct_fall : 50;
+  slew_lower_threshold_pct_rise : 30;
+  slew_lower_threshold_pct_fall : 30;
+  slew_upper_threshold_pct_rise : 70;
+  slew_upper_threshold_pct_fall : 70;
+  slew_derate_from_library : 1.0;
+
+
+  nom_process                    : 1.0;
+  nom_temperature                : 25.0;
+  nom_voltage                    : 5.00;
+
+  lu_table_template(template_1) {
+    variable_1 : total_output_net_capacitance;
+    index_1("0.00100,  0.00264,  0.00840,  0.01939,  0.03652,  0.06055,  0.09218,  0.13200,  0.18070,  0.23860");
+  }
+
+  cell ("ic_top_usb_audio") {
+    area : 2017244.500 
+    is_macro_cell : true;
+    pin("bitstream_out") {
+      direction : output;
+      capacitance : 0.0008;
+      timing() {
+        related_pin : "reset_n";
+        timing_sense : positive_unate;
+        timing_type : combinational;
+	cell_rise(template_1) {
+          index_1("0.00100,  0.00264,  0.00840,  0.01939,  0.03652,  0.06055,  0.09218,  0.13200,  0.18070,  0.23860");
+          values("5.28123,5.29773,5.35187,5.45329,5.61213,5.83547,6.13005,6.50041,6.95341,7.49305");
+	}
+	rise_transition(template_1) {
+          index_1("0.00100,  0.00264,  0.00840,  0.01939,  0.03652,  0.06055,  0.09218,  0.13200,  0.18070,  0.23860");
+          values("0.08071,0.10494,0.19346,0.37140,0.65395,1.05137,1.57400,2.23174,3.03300,3.99126");
+	}
+	cell_fall(template_1) {
+          index_1("0.00100,  0.00264,  0.00840,  0.01939,  0.03652,  0.06055,  0.09218,  0.13200,  0.18070,  0.23860");
+          values("5.08036,5.09836,5.14977,5.22975,5.33896,5.48312,5.66939,5.90340,6.18939,6.53040");
+	}
+	fall_transition(template_1) {
+          index_1("0.00100,  0.00264,  0.00840,  0.01939,  0.03652,  0.06055,  0.09218,  0.13200,  0.18070,  0.23860");
+          values("0.09783,0.11627,0.17100,0.26811,0.41910,0.64164,0.94378,1.33110,1.80700,2.37490");
+	}
+      }
+    }
+    pin("clk60mhz") {
+      direction : input;
+      capacitance : 0.0037;
+    }
+    pin("reset_n") {
+      direction : input;
+      capacitance : 0.0038;
+    }
+    pin("usb_dn") {
+      direction : inout;
+      capacitance : 0.0926;
+    }
+    pin("usb_dp") {
+      direction : inout;
+      capacitance : 0.0907;
+    }
+    pin("usb_dp_pull") {
+      direction : output;
+      capacitance : 0.0024;
+    }
+  }
+
+}
