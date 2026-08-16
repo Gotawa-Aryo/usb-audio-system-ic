@@ -13,8 +13,58 @@
 # ======================================================
 project:
   title: "Modular USB Audio Codec with Audio Output"
-  team: "XLR8"  
+  team: "XLR8"
   discord: "gotawa_aryo"
   description: "Single-chip USB-to-audio interface system consisting of USB interface (UAC 1.0) standard and DAC audio output."
   lvs_config: "lvs_config.json"
 
+pins:
+  # --- DIGITAL INPUTS, ESSENTIAL ---
+  - name: SYS_CLK_60M           # Main 60 MHz system clock input
+    io_type: input_schmitt
+  - name: RESET_N               # Active-low system global reset input
+    io_type: input_cmos
+  - name: DAC_FB_IN_L           # Left-channel Delta-Sigma DAC feedback input to the analog section
+    io_type: input_cmos
+  # --- DIGITAL INPUTS, STRETCH GOAL ---
+  # - name: DAC_FB_IN_R         # Right-channel Delta-Sigma DAC feedback input to the analog section
+  #   io_type: input_cmos
+  # - name: ADC_FB_IN           # Delta-Sigma ADC feedback input to the DSP block
+  #   io_type: input_cmos
+
+  # --- DIGITAL OUTPUTS, ESSENTIAL ---
+  # These are output-only, but no output-only io_type exists [?].
+  # So these use bidirectional pads instead.
+  - name: USB_DP_PULL           # Enables the 1.5 kOhm pull-up resistor on the USB D+ line
+    io_type: bidirectional
+  - name: DAC_MOD_OUT_L         # Left-channel Delta-Sigma DAC modulator output bitstream
+    io_type: bidirectional
+  # --- DIGITAL OUTPUTS, STRETCH GOAL ---
+  # - name: DAC_MOD_OUT_R       # Right-channel Delta-Sigma DAC modulator output bitstream
+  #   io_type: bidirectional
+  # - name: ADC_MOD_OUT         # Delta-Sigma ADC modulator output bitstream from the AFE
+  #   io_type: bidirectional
+
+  # --- DIGITAL BIDIRECTIONAL ---
+  - name: USB_DP                # USB Full-Speed D+ differential data line
+    io_type: bidirectional
+  - name: USB_DN                # USB Full-Speed D- differential data line
+    io_type: bidirectional
+
+  # --- ANALOG ---
+  - name: AUDIO_OUT_L           # Left-channel analog audio output
+    io_type: analog
+    secondary_esd: false
+  # --- ANALOG, STRETCH GOAL ---
+  # - name: AUDIO_OUT_R         # Right-channel analog audio output
+  #   io_type: analog
+  #   secondary_esd: false
+  # - name: MIC_IN              # Analog microphone/audio input signal
+  #   io_type: analog
+  #   secondary_esd: true
+
+  # --- Supply ---
+  - name: VDD                   # Positive power supply input
+    io_type: power
+  - name: VSS                   # Ground reference (listed for completeness)
+    io_type: ground             # note: due to a common ground connection, ground pads are generally not needed.

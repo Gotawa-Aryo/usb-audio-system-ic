@@ -1,153 +1,118 @@
-# chipathon-2026-gf180mcu-padring
+# USB Audio System IC
 
-Chipathon 2026 workshop fork of the wafer-space `gf180mcu-project-template`.
-Adds a new LibreLane slot, `workshop`, that mirrors Juan Moya's
-standalone workshop padring as a native LibreLane slot definition so
-participants can take the flow all the way to GDS with the stock
-template Makefile.
+Single-chip USB-to-audio interface for the SSCS Chipathon 2026, targeting the GlobalFoundries 180nm MCU PDK (gf180mcuD). The chip enumerates as a USB Audio Class 1.0 device over full speed (12 Mbps) and converts the received stereo stream into a 1-bit delta-sigma bitstream for an external analog front end.
 
-No PRs are planned against upstream; all chipathon-specific material
-stays in this fork.
+Team XLR8. Top module `ic_top_usb_audio`.
 
-## Credits
+## Attribution
 
-This repository is a **derivation**. The template, Nix flake, and
-LibreLane flow are the work of Leo Moser and the wafer-space
-contributors; the workshop pad layout is a port of Juan Moya's
-`padring_gf180`. Both are Apache-2.0.
+The main reference for this project is WangXuan95's FPGA-USB-Device, https://github.com/WangXuan95/FPGA-USB-Device (Apache-2.0).
 
-- Upstream template — https://github.com/wafer-space/gf180mcu-project-template
-  pinned at commit `8bd0f6ff28947bf222c5288343f8f3ee1fc04632`
-  (`chore: update flake to librelane 3.0`, 2026-03-26).
-- Workshop pad layout — https://github.com/JuanMoya/padring_gf180
-  (`Workshop_CASS/padring/workshop_padring.cfg`).
+Our code is still using their work. The USB full-speed device core is theirs, and `usb_audio_top.v` is their audio top with an async FIFO read port added on our side. The USB string descriptors in `usb_audio_top.v` still report "github.com/WangXuan95" and "FPGA-USB-audio" because we have not replaced them yet. We are on our way to a custom device, so the next iterations replace the borrowed core and its descriptors with our own USB front end.
 
-See `CREDITS.md` for the per-artifact attribution and `NOTICE` for
-the formal Apache-2.0 notice.
+| Module | Origin |
+|--------|--------|
+| `usbfs_bitlevel.v` | FPGA-USB-Device |
+| `usbfs_core_top.v` | FPGA-USB-Device |
+| `usbfs_packet_rx.v` | FPGA-USB-Device |
+| `usbfs_packet_tx.v` | FPGA-USB-Device |
+| `usbfs_transaction.v` | FPGA-USB-Device |
+| `usb_audio_top.v` | FPGA-USB-Device, extended with the async FIFO read side |
+| `async_fifo.v` | XLR8 |
+| `oversampling_trigger.v` | XLR8 |
+| `first_order_dfe.v` | XLR8 |
+| `rtl_adder_block.v`, `rtl_difference_block.v`, `rtl_digital_shifter.v` | XLR8 |
+| `ic_top_usb_audio.v` | XLR8 |
 
-## What this fork changes vs upstream
+The repository infrastructure (Nix flake, LibreLane slots, padring, Makefile) is a fork of the wafer-space `gf180mcu-project-template` with Juan Moya's workshop padring. See `CREDITS.md`, `NOTICE`, and `AUTHORS.md` for the per-artifact attribution.
 
-Exactly 6 files (one commit on top of pinned upstream):
+## Signal path
 
-| File | Change |
-|------|--------|
-| `src/slot_defines.svh` | add `SLOT_WORKSHOP` block (NUM_INPUT=1, BIDIR=20, ANALOG=60, 4/4 DVDD/DVSS) |
-| `src/chip_core.sv` | replace example counter with a 20-bit counter driving the 20 bidir pads; analog pads float through |
-| `librelane/slots/slot_workshop.yaml` | **new** slot (DIE 2935x2935 um, CORE 2051x2051 um, VERILOG_DEFINES=SLOT_WORKSHOP) |
-| `librelane/config.yaml` | drop SRAM `MACROS` entry and PDN macro connections - not used in this slot |
-| `librelane/pdn_cfg.tcl` | drop SRAM-specific `define_pdn_grid` blocks |
-| `Makefile` | `AVAILABLE_SLOTS += workshop` |
+USB D+/D- go into the full-speed core, decoded samples land in an async FIFO, and a 48 kHz trigger drains the FIFO into a first-order delta-sigma modulator that drives one output pin.
 
-`git log upstream/main..main` shows the single derivation commit;
-`git diff upstream/main..main` shows the delta.
+- USB full speed (12 Mbps), UAC 1.0, stereo 16-bit at 48 kHz
+- VID and PID both 0xFB9A, isochronous IN endpoint 0x82 (192 byte packets, 2 channels x 2 bytes x 48 samples) and isochronous OUT endpoint 0x01
+- Async FIFO 32 bits wide (16-bit left plus 16-bit right), 16 entries, gray-code pointers with 2-flop synchronizers
+- Sample trigger from the 60 MHz clock divided by 1250, giving 48 kHz
+- First-order delta-sigma modulator on an 18-bit accumulator, oversampling ratio 1250
+- `bitstream_out` is 1 bit and drives an off-chip low-pass filter, buffer, and power amplifier
 
-## Workshop slot - pad map at a glance
+### Pins
 
-- Die: **2935 x 2935 um** (same as Juan Moya's reference).
-- **60 x analog** (`gf180mcu_fd_io__asig_5p0`)
-- **20 x bidir** (`gf180mcu_fd_io__bi_24t`)
-- **4 x DVDD** + **4 x DVSS** (`gf180mcu_ws_io__dvdd` / `__dvss`)
-- **clk_pad** (`gf180mcu_fd_io__in_s`), **rst_n_pad** (`gf180mcu_fd_io__in_c`)
-- **1 x input_pad** - Yosys zero-width-vector workaround; chipathon
-  participants can ignore it (documented in `docs/workshop-slot-spec.md`).
-- **4 x corner** (`gf180mcu_fd_io__cor`, inserted by LibreLane).
+| Pin | Direction | Function |
+|-----|-----------|----------|
+| `clk60mhz` | input | 60 MHz clock source, required by the USB core |
+| `reset_n` | input | active-low external reset |
+| `usb_dp`, `usb_dn` | inout | USB D+ and D- |
+| `usb_dp_pull` | output | drives D+ through a 1.5k resistor for full-speed detection |
+| `bitstream_out` | output | 1-bit delta-sigma output to the AFE |
 
-Pad ordering in `PAD_NORTH` and `PAD_WEST` is **reversed** relative to
-Juan Moya's standalone `workshop_padring.cfg` because LibreLane reads
-pad lists clockwise from the SW corner. Full pad-by-pad mapping in
-`docs/workshop-slot-spec.md`.
+## Physical implementation
 
-## Quickstart
+Hardened with LibreLane 3.0.4 on gf180mcuD, standard cell library `gf180mcu_fd_sc_mcu7t5v0`, routing on Metal2 through Metal5, single 5.0 V VDD/VSS domain.
 
-### Build the workshop slot (native, nix-shell)
+| Metric | Value |
+|--------|-------|
+| Die area | 1436 x 1454 um (2.09 mm2) |
+| Core utilization | 62.8% |
+| Standard cells | 46,420 |
+| Total instances | 101,777 (including fill, decap, and tap) |
+| Routed wirelength | 2.23 m |
+| Total power | 33.8 mW |
+| Magic DRC | 0 violations |
+| Routing DRC | 0 violations |
+| LVS | 0 mismatches |
+| GDS XOR difference | 0 |
+| Hold worst slack | +8.94 ns |
+
+Signoff views are committed under `layout/`, including GDS, DEF, LEF, SPICE, powered netlist, SPEF and SDF for 9 corners, and a rendered PNG in `layout/render/`.
+
+## Known issues
+
+- Setup timing fails at the three slow corners, worst slack -1.30 ns at `max_ss_125C_4v50`. The typical and fast corners pass at +3.34 ns and +5.31 ns.
+- 16,411 max-slew and 196 max-cap violations remain open.
+- 2 nets still report antenna violations.
+- `ic_top_usb_audio.v` ties the USB core `rstn` to `1'b1`, so `reset_n` reaches only the FIFO read side, the trigger, and the modulator. The USB block does not reset with the rest of the chip.
+- The FIFO write side runs on the same 60 MHz clock as the read side at this level, so the clock-domain crossing is present in the RTL but not yet exercised.
+
+## Build
+
+The digital core layout under `layout/` was hardened from `src/config.json`, which is a standalone LibreLane configuration with `DESIGN_NAME` set to `ic_top_usb_audio`. It does not run from this repository's Makefile.
+
+The Makefile drives the padring template flow, which builds `chip_top` rather than the digital core.
 
 ```bash
-git clone <this-repo-url> chipathon-2026-gf180mcu-padring
-cd chipathon-2026-gf180mcu-padring
-nix-shell               # provides LibreLane 3.0.0
-make clone-pdk          # clones wafer-space/gf180mcu @ 1.8.0
+nix-shell
+make clone-pdk
 SLOT=workshop make librelane
 ```
 
-Runtime on a modern laptop: **~2h 15m** for the full signoff run
-(Magic DRC + KLayout DRC + LVS + antenna + STA across 3 corners).
+Other useful targets are `make sim` (cocotb RTL simulation), `make librelane-klayout` (open the last run in KLayout), and `make render-image`. See `docs/reproducing-native.md` and `docs/reproducing-docker.md`.
 
-Final artifacts land in `final/`:
-- `final/gds/chip_top.gds` (~85 MB)
-- `final/metrics.csv` (signoff metrics)
-- `final/*.log` (per-stage logs)
+## LVS
 
-### Inspect a built GDS (Docker, hpretl/iic-osic-tools)
-
-`scripts/run_docker_iic.sh` spawns the iic-osic-tools container with
-this repo mounted; inside the container run `klayout final/gds/chip_top.gds`
-or `magic -T .../gf180mcuD.magicrc ...`.
-
-See `docs/reproducing-native.md` and `docs/reproducing-docker.md` for
-the detailed walkthroughs.
-
-### Use the workshop slot for your own RTL
-
-Swap `src/chip_core.sv` with your design, keeping the port list
-(NUM_INPUT=1, NUM_BIDIR=20, NUM_ANALOG=60, clk, rst_n), and re-run
-`SLOT=workshop make librelane`. Padring stays fixed.
-
-## Verification
-
-The repository was validated **end-to-end** against a known-good
-reference build. To re-run the pragmatic check (byte-compare the
-six tracked files against the reference tree):
-
-```bash
-scripts/verify_workshop_slot.sh /path/to/reference/template
-```
-
-The reference build (DRC/LVS/antenna/STA signoff on 2026-04-23 with
-LibreLane 3.0 + wafer-space PDK 1.8.0) is the source of truth for
-"clean". As long as the fork's six files byte-match that reference,
-a fresh build on a compatible host will reproduce the same result.
-
-If you do not have the reference tree, the repo itself is the ground
-truth - this fork *is* those six files.
+`lvs_config.json` at the repository root configures the chipathon KLayout LVS flow. It compares `layout/gds/ic_top_usb_audio.gds` against the powered netlist `layout/pnl/ic_top_usb_audio.pnl.v`. The design is flat with no macros, so the flatten, abstract, and ignore lists are empty. `info.yaml` points at this file.
 
 ## Repository layout
 
 ```
 .
-|-- README.md                       # this file
-|-- NOTICE                          # Apache-2.0 attribution
-|-- CREDITS.md                      # detailed credits
-|-- AUTHORS.md                      # copyright holders (upstream + fork)
-|-- LICENSE                         # Apache-2.0
-|-- docs/
-|   |-- workshop-slot-spec.md       # full pad-by-pad mapping
-|   |-- reproducing-native.md       # nix-shell walkthrough
-|   `-- reproducing-docker.md       # iic-osic-tools walkthrough
-|-- examples/
-|   `-- rtl2gds_chipathon_padring.ipynb   # standalone notebook
-|-- scripts/
-|   |-- run_docker_iic.sh           # iic-osic-tools launcher
-|   `-- verify_workshop_slot.sh     # pragmatic end-to-end check
-|-- librelane/
-|   |-- config.yaml                 # top-level LibreLane config (patched)
-|   |-- pdn_cfg.tcl                 # PDN generator (patched)
-|   |-- chip_top.sdc                # upstream, unchanged
-|   `-- slots/
-|       |-- slot_0p5x0p5.yaml       # upstream, unchanged
-|       |-- slot_0p5x1.yaml         # upstream, unchanged
-|       |-- slot_1x0p5.yaml         # upstream, unchanged
-|       |-- slot_1x1.yaml           # upstream, unchanged
-|       `-- slot_workshop.yaml      # new (this fork)
+|-- lvs_config.json                 # chipathon LVS flow config
+|-- info.yaml                       # chipathon project metadata
 |-- src/
-|   |-- chip_top.sv                 # upstream, unchanged
-|   |-- chip_core.sv                # patched (counter->bidir)
-|   `-- slot_defines.svh            # patched (SLOT_WORKSHOP)
-|-- Makefile                        # patched (AVAILABLE_SLOTS += workshop)
-`-- (upstream infra: flake.nix, gf180mcu/, ip/, cocotb/, scripts/, ...)
+|   |-- config.json                 # LibreLane config for the digital core
+|   |-- digital_design/             # USB audio RTL (13 Verilog files)
+|   |-- chip_top.sv                 # padring template top
+|   |-- chip_core.sv                # padring template core
+|   `-- slot_defines.svh            # slot pad counts
+|-- layout/                         # signoff views for ic_top_usb_audio
+|-- librelane/                      # padring flow config and slot definitions
+|-- ip/                             # wafer-space ID and logo macros
+|-- scripts/                        # padring, image render, docker launcher
+|-- cocotb/                         # RTL and gate-level testbench
+`-- docs/                           # padring slot spec and reproduction guides
 ```
 
 ## License
 
-Apache-2.0, inherited from upstream. See `LICENSE` for the full text,
-`NOTICE` for attribution of third-party material, and `AUTHORS.md`
-for the list of copyright holders.
+Apache-2.0. See `LICENSE` for the full text and `NOTICE` for third-party attribution.
