@@ -12,22 +12,10 @@ module usbfs_core_top #(
     parameter [ 64*8-1:0] DESCRIPTOR_STR2   = 0,                  // 64 byte capacity
     parameter [ 64*8-1:0] DESCRIPTOR_STR3   = 0,                  // 64 byte capacity
     parameter [ 64*8-1:0] DESCRIPTOR_STR4   = 0,                  // 64 byte capacity
-    parameter [ 64*8-1:0] DESCRIPTOR_STR5   = 0,                  // 64 byte capacity
-    parameter [ 64*8-1:0] DESCRIPTOR_STR6   = 0,                  // 64 byte capacity
     parameter [512*8-1:0] DESCRIPTOR_CONFIG = 0,                  // 512 byte capacity
+    parameter       [9:0] DESCRIPTOR_CONFIG_LEN = 10'd512,        // bytes actually used
     parameter       [7:0] EP00_MAXPKTSIZE   = 8'h20,              // endpoint 00 (control endpoint) packet byte length.
-    parameter       [9:0] EP81_MAXPKTSIZE   = 10'h20,             // endpoint 81 packet byte length. If it is a ISOCHRONOUS endpoint, MAXPKTSIZE can be 10'h1~10'h3FF, otherwise MAXPKTSIZE can only be 10'h8, 10'h10, 10'h20, or 10'h40.
-    parameter       [9:0] EP82_MAXPKTSIZE   = 10'h20,             // endpoint 82 packet byte length. If it is a ISOCHRONOUS endpoint, MAXPKTSIZE can be 10'h1~10'h3FF, otherwise MAXPKTSIZE can only be 10'h8, 10'h10, 10'h20, or 10'h40.
-    parameter       [9:0] EP83_MAXPKTSIZE   = 10'h20,             // endpoint 83 packet byte length. If it is a ISOCHRONOUS endpoint, MAXPKTSIZE can be 10'h1~10'h3FF, otherwise MAXPKTSIZE can only be 10'h8, 10'h10, 10'h20, or 10'h40.
-    parameter       [9:0] EP84_MAXPKTSIZE   = 10'h20,             // endpoint 84 packet byte length. If it is a ISOCHRONOUS endpoint, MAXPKTSIZE can be 10'h1~10'h3FF, otherwise MAXPKTSIZE can only be 10'h8, 10'h10, 10'h20, or 10'h40.
-    parameter             EP81_ISOCHRONOUS  = 0,                  // endpoint 81 is ISOCHRONOUS ?
-    parameter             EP82_ISOCHRONOUS  = 0,                  // endpoint 82 is ISOCHRONOUS ?
-    parameter             EP83_ISOCHRONOUS  = 0,                  // endpoint 83 is ISOCHRONOUS ?
-    parameter             EP84_ISOCHRONOUS  = 0,                  // endpoint 84 is ISOCHRONOUS ?
     parameter             EP01_ISOCHRONOUS  = 0,                  // endpoint 01 is ISOCHRONOUS ?
-    parameter             EP02_ISOCHRONOUS  = 0,                  // endpoint 02 is ISOCHRONOUS ?
-    parameter             EP03_ISOCHRONOUS  = 0,                  // endpoint 03 is ISOCHRONOUS ?
-    parameter             EP04_ISOCHRONOUS  = 0,                  // endpoint 04 is ISOCHRONOUS ?
     parameter             DEBUG             = "FALSE"             // whether to output debug info, "TRUE" or "FALSE"
 ) (
     input  wire        rstn,          // active-low reset, reset when rstn=0 (USB will unplug when reset)
@@ -45,34 +33,15 @@ module usbfs_core_top #(
     output wire [63:0] ep00_setup_cmd,
     output wire [ 8:0] ep00_resp_idx,
     input  wire [ 7:0] ep00_resp,
-    // endpoint 0x81 data input (device-to-host)
-    input  wire [ 7:0] ep81_data,     // IN data byte
-    input  wire        ep81_valid,    // when device want to send a data byte, assert valid=1. the data byte will be sent successfully when valid=1 & ready=1.
-    output wire        ep81_ready,    // handshakes with valid. ready=1 indicates the data byte can be accept.
-    // endpoint 0x82 data input (device-to-host)
-    input  wire [ 7:0] ep82_data,     // IN data byte
-    input  wire        ep82_valid,    // when device want to send a data byte, assert valid=1. the data byte will be sent successfully when valid=1 & ready=1.
-    output wire        ep82_ready,    // handshakes with valid. ready=1 indicates the data byte can be accept.
-    // endpoint 0x83 data input (device-to-host)
-    input  wire [ 7:0] ep83_data,     // IN data byte
-    input  wire        ep83_valid,    // when device want to send a data byte, assert valid=1. the data byte will be sent successfully when valid=1 & ready=1.
-    output wire        ep83_ready,    // handshakes with valid. ready=1 indicates the data byte can be accept.
-    // endpoint 0x84 data input (device-to-host)
-    input  wire [ 7:0] ep84_data,     // IN data byte
-    input  wire        ep84_valid,    // when device want to send a data byte, assert valid=1. the data byte will be sent successfully when valid=1 & ready=1.
-    output wire        ep84_ready,    // handshakes with valid. ready=1 indicates the data byte can be accept.
+    // endpoint 0 OUT data stage (host-to-device control data, e.g. audio class SET_CUR)
+    output wire [ 7:0] ep00_data_out,
+    output wire        ep00_data_valid,
+    output wire [ 8:0] ep00_data_idx,
     // endpoint 0x01 data output (host-to-device)
     output wire [ 7:0] ep01_data,     // OUT data byte
     output wire        ep01_valid,    // when out_valid=1 pulses, a data byte is received on out_data
-    // endpoint 0x02 data output (host-to-device)
-    output wire [ 7:0] ep02_data,     // OUT data byte
-    output wire        ep02_valid,    // when out_valid=1 pulses, a data byte is received on out_data
-    // endpoint 0x03 data output (host-to-device)
-    output wire [ 7:0] ep03_data,     // OUT data byte
-    output wire        ep03_valid,    // when out_valid=1 pulses, a data byte is received on out_data
-    // endpoint 0x04 data output (host-to-device)
-    output wire [ 7:0] ep04_data,     // OUT data byte
-    output wire        ep04_valid,    // when out_valid=1 pulses, a data byte is received on out_data
+    output wire        ep01_commit,   // the packet those bytes came from passed CRC16
+    output wire        ep01_abort,    // it did not - discard them
     // debug output info, only for USB developers, can be ignored for normally use
     output wire        debug_en,      // when debug_en=1 pulses, a byte of debug info appears on debug_data
     output wire [ 7:0] debug_data,    // 
@@ -240,22 +209,10 @@ usbfs_transaction #(
     .DESCRIPTOR_STR2    ( DESCRIPTOR_STR2    ),
     .DESCRIPTOR_STR3    ( DESCRIPTOR_STR3    ),
     .DESCRIPTOR_STR4    ( DESCRIPTOR_STR4    ),
-    .DESCRIPTOR_STR5    ( DESCRIPTOR_STR5    ),
-    .DESCRIPTOR_STR6    ( DESCRIPTOR_STR6    ),
     .DESCRIPTOR_CONFIG  ( DESCRIPTOR_CONFIG  ),
+    .DESCRIPTOR_CONFIG_LEN ( DESCRIPTOR_CONFIG_LEN ),
     .EP00_MAXPKTSIZE    ( EP00_MAXPKTSIZE    ),
-    .EP81_MAXPKTSIZE    ( EP81_MAXPKTSIZE    ),
-    .EP82_MAXPKTSIZE    ( EP82_MAXPKTSIZE    ),
-    .EP83_MAXPKTSIZE    ( EP83_MAXPKTSIZE    ),
-    .EP84_MAXPKTSIZE    ( EP84_MAXPKTSIZE    ),
-    .EP81_ISOCHRONOUS   ( EP81_ISOCHRONOUS   ),
-    .EP82_ISOCHRONOUS   ( EP82_ISOCHRONOUS   ),
-    .EP83_ISOCHRONOUS   ( EP83_ISOCHRONOUS   ),
-    .EP84_ISOCHRONOUS   ( EP84_ISOCHRONOUS   ),
-    .EP01_ISOCHRONOUS   ( EP01_ISOCHRONOUS   ),
-    .EP02_ISOCHRONOUS   ( EP02_ISOCHRONOUS   ),
-    .EP03_ISOCHRONOUS   ( EP03_ISOCHRONOUS   ),
-    .EP04_ISOCHRONOUS   ( EP04_ISOCHRONOUS   )
+    .EP01_ISOCHRONOUS   ( EP01_ISOCHRONOUS   )
 ) u_usbfs_transaction (
     .rstn               ( usb_rstn           ),
     .clk                ( clk                ),
@@ -275,26 +232,13 @@ usbfs_transaction #(
     .ep00_setup_cmd     ( ep00_setup_cmd     ),
     .ep00_resp_idx      ( ep00_resp_idx      ),
     .ep00_resp          ( ep00_resp          ),
-    .ep81_data          ( ep81_data          ),
-    .ep81_valid         ( ep81_valid         ),
-    .ep81_ready         ( ep81_ready         ),
-    .ep82_data          ( ep82_data          ),
-    .ep82_valid         ( ep82_valid         ),
-    .ep82_ready         ( ep82_ready         ),
-    .ep83_data          ( ep83_data          ),
-    .ep83_valid         ( ep83_valid         ),
-    .ep83_ready         ( ep83_ready         ),
-    .ep84_data          ( ep84_data          ),
-    .ep84_valid         ( ep84_valid         ),
-    .ep84_ready         ( ep84_ready         ),
+    .ep00_data_out      ( ep00_data_out      ),
+    .ep00_data_valid    ( ep00_data_valid    ),
+    .ep00_data_idx      ( ep00_data_idx      ),
     .ep01_data          ( ep01_data          ),
     .ep01_valid         ( ep01_valid         ),
-    .ep02_data          ( ep02_data          ),
-    .ep02_valid         ( ep02_valid         ),
-    .ep03_data          ( ep03_data          ),
-    .ep03_valid         ( ep03_valid         ),
-    .ep04_data          ( ep04_data          ),
-    .ep04_valid         ( ep04_valid         )
+    .ep01_commit        ( ep01_commit        ),
+    .ep01_abort         ( ep01_abort         )
 );
 
 

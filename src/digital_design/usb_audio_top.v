@@ -3,9 +3,10 @@
 // Module  : usb_audio_input_top
 // Type    : synthesizable, IP's top
 // Standard: Verilog 2001 (IEEE1364-2001)
-// Function: A USB Full Speed (12Mbps) device, act as a USB Audio device.
-//           Including an audio output device (host-to-device, such as a speaker),
-//           and an audio input device (device-to-host, such as a microphone).
+// Function: A USB Full Speed (12Mbps) device, acting as a USB Audio Class 1.0 headphone
+//           (host-to-device audio only). The capture path of the original IP has been
+//           removed: this chip has no audio input pin, and the descriptors declare the
+//           Basic Audio Device Headphone topology.
 //--------------------------------------------------------------------------------------------------------
 
 module usb_audio_top #(
@@ -19,18 +20,14 @@ module usb_audio_top #(
     inout              usb_dn,        // USB D-
     // USB reset output
     output wire        usb_rstn,      // 1: connected , 0: disconnected (when USB cable unplug, or when system reset (rstn=0))
-    // user data : audio output (host-to-device, such as a speaker), and audio input (device-to-host, such as a microphone).
-    output reg         audio_en,      // a 48kHz pulse, that is, audio_en=1 for 1 cycle every 1250 cycles. Note that 60MHz/48kHz=1250, where 60MHz is clk frequency.
-    output reg  [15:0] audio_lo,      // left-channel  output: 16-bit signed integer, which will be valid when audio_en=1
-    output reg  [15:0] audio_ro,      // right-channel output: 16-bit signed integer, which will be valid when audio_en=1
-    input  wire [15:0] audio_li,      // left-channel  input : 16-bit signed integer, which will be sampled when audio_en=1
-    input  wire [15:0] audio_ri,      // right-channel input : 16-bit signed integer, which will be sampled when audio_en=1
-    // Async FIFO read side : separate clock domain so a downstream consumer can drain at its own rate
-    input  wire        fifo_rd_clk,   // FIFO read-side clock (any rate, asynchronous to clk is fine)
-    input  wire        fifo_rd_rstn,  // active-low reset, synchronous to fifo_rd_clk
-    input  wire        fifo_rd_en,    // pulse high to pop one 32-bit sample
-    output wire [31:0] fifo_rd_data,  // {right[15:0], left[15:0]} popped from the FIFO
-    output wire        fifo_rd_empty, // 1 = no data available
+    // Left-channel PCM stream out to the FIFO Buffer (block 1.2 of Figure 3).
+    // The chip only drives one analog channel, so only the left channel leaves this block.
+    output wire        wr_en_l,       // WR_EN_L : write strobe, high for 1 cycle per sample
+    output wire [15:0] data_l,        // DATA_L  : 16-bit signed mono PCM, valid when wr_en_l=1
+    output wire        wr_commit_l,   // the packet those samples came from passed CRC16
+    output wire        wr_abort_l,    // it did not - the FIFO must discard them
+    // Frame marker for the Control Unit (block 1.3), which locks the sample clock to it.
+    output wire        sof_out,       // 1 cycle pulse at each USB start-of-frame (1 kHz)
     // debug output info, only for USB developers, can be ignored for normally use. Please set DEBUG="TRUE" to enable these signals
     output wire        debug_en,      // when debug_en=1 pulses, a byte of debug info appears on debug_data
     output wire [ 7:0] debug_data,    //
@@ -38,191 +35,134 @@ module usb_audio_top #(
 );
 
 
-initial audio_en = 1'b0;
-initial audio_ro = 16'h0;
-initial audio_lo = 16'h0;
-
-
 wire       sof;
 
 wire [7:0] out_data;      // data from USB device core (host-to-device)
 wire       out_valid;
+wire       out_commit;    // the packet out_data came from passed CRC16
+wire       out_abort;     // it did not
 
-wire [7:0] in_data;       // data to USB device core (device-to-host)
-reg        in_valid = 1'b0;
-wire       in_ready;
-
-
-
-//-------------------------------------------------------------------------------------------------------------------------------------
-// generate a 48kHz pulse signal (audio_en). Note that 48kHz is the audio sample rate.
-//-------------------------------------------------------------------------------------------------------------------------------------
-reg  [10:0] cnt = 11'h0;             // a counter from 0 to 1249, since 60MHz/48kHz=1250, where 60MHz is clk frequency.
-always @ (posedge clk or negedge usb_rstn)
-    if (~usb_rstn) begin
-        cnt <= 11'h0;
-        audio_en <= 1'b0;
-    end else begin
-        if (cnt < 11'd1249) begin
-            cnt <= cnt + 11'd1;
-            audio_en <= 1'b0;
-        end else begin
-            cnt <= 11'h0;
-            audio_en <= 1'b1;
-        end
-    end
 
 
 
 //-------------------------------------------------------------------------------------------------------------------------------------
-// audio output (host-to-device) : convert byte-stream to 2-channel-16-bit-PCM
+// audio output (host-to-device) : convert byte-stream to 16-bit mono PCM
+//   The stream is mono, so a sample is two bytes: LSB then MSB. o_pcm_cnt tracks which of
+//   the two is arriving and is re-zeroed on SOF, so a short or corrupt packet cannot leave
+//   the byte phase inverted for the rest of the stream.
 //-------------------------------------------------------------------------------------------------------------------------------------
-reg  [ 1:0] o_pcm_cnt = 2'h0;    // count from 0 to 3
-reg  [31:0] o_pcm     = 0;       // = { right-channel[15:0] , left-channel[15:0] }
+reg         o_pcm_cnt = 1'b0;    // 0 = expecting LSB, 1 = expecting MSB
+reg  [15:0] o_pcm     = 16'h0;   // 16-bit signed mono sample
 reg         o_pcm_en  = 1'b0;    // when o_pcm_en=1, o_pcm valid
 always @ (posedge clk or negedge usb_rstn)
     if (~usb_rstn) begin
-        o_pcm_cnt <= 2'h0;
-        o_pcm     <= 0;
+        o_pcm_cnt <= 1'b0;
+        o_pcm     <= 16'h0;
         o_pcm_en  <= 1'b0;
     end else begin
         o_pcm_en <= 1'b0;
-        if (sof) begin                                // reset at the start of a new frame
-            o_pcm_cnt <= 2'h0;
+        if (sof | out_abort) begin                    // new frame, or a rejected packet
+            o_pcm_cnt <= 1'b0;                        // drop any half-assembled sample
         end else if (out_valid) begin
-            o_pcm_cnt <= o_pcm_cnt + 2'd1;
-            o_pcm     <= {out_data, o_pcm[31:8]};     // shift on o_pcm from high-byte to low-byte
-            o_pcm_en  <= (o_pcm_cnt == 2'd3);         // get a 32-bit PCM data every 4 bytes.
+            o_pcm_cnt <= ~o_pcm_cnt;
+            o_pcm     <= {out_data, o_pcm[15:8]};     // shift in from the high byte down
+            o_pcm_en  <= o_pcm_cnt;                   // a full sample every 2 bytes
         end
     end
 
 
 
 //-------------------------------------------------------------------------------------------------------------------------------------
-// audio output (host-to-device) : buffer. The goal is to convert the USB-packet-burst data into a stable 48ksps output.
+// Feature Unit ID2 : Mute on Master, Volume on Center Front
+//   BADD 5.3.3.1.10 requires both controls on a Headphone device, and 5.4.2.1 requires
+//   SET_CUR/GET_CUR on Mute plus CUR/MIN/MAX/RES on Volume. Volume is a signed 16-bit
+//   value in 1/256 dB units, as defined by Audio 1.0. The signal path is mono, so there
+//   is a single Volume channel (Center Front, channel 1) - BADD Table 5-5.
 //-------------------------------------------------------------------------------------------------------------------------------------
-reg [31:0] bufo [511 : 0];                    // may automatically synthesize to BRAM
-reg [31:0] bufo_rd;
-reg [ 9:0] bufo_wptr = 10'h0;
-reg [ 9:0] bufo_rptr = 10'h0;
-wire bufo_full_n  = (bufo_wptr != {~bufo_rptr[9], bufo_rptr[8:0]});
-wire bufo_empty_n = (bufo_wptr != bufo_rptr);
+localparam [ 7:0] FU_ID       = 8'h02;
+localparam [ 7:0] CS_MUTE     = 8'h01;
+localparam [ 7:0] CS_VOLUME   = 8'h02;
+localparam [ 7:0] REQ_SET_CUR = 8'h01;
+localparam [ 7:0] REQ_GET_CUR = 8'h81;
+localparam [ 7:0] REQ_GET_MIN = 8'h82;
+localparam [ 7:0] REQ_GET_MAX = 8'h83;
+localparam [ 7:0] REQ_GET_RES = 8'h84;
 
-always @ (posedge clk or negedge usb_rstn)
-    if (~usb_rstn) begin
-        bufo_wptr <= 10'h0;
-    end else begin
-        if (o_pcm_en & bufo_full_n)
-            bufo_wptr <= bufo_wptr + 10'd1;
+localparam [15:0] VOL_MIN = 16'hC000;      // -64.00 dB
+localparam [15:0] VOL_MAX = 16'h0000;      //   0.00 dB
+localparam [15:0] VOL_RES = 16'h0100;      //   1.00 dB per step
+localparam [15:0] VOL_DEF = 16'hF000;      // -16.00 dB out of the box (BADD 4)
+
+wire [63:0] ep00_setup_cmd;
+wire [ 8:0] ep00_resp_idx;
+wire [ 7:0] ep00_data_out;
+wire        ep00_data_valid;
+wire [ 8:0] ep00_data_idx;
+reg  [ 7:0] ep00_resp;
+
+wire [ 7:0] fu_rtype = ep00_setup_cmd[ 7: 0];
+wire [ 7:0] fu_req   = ep00_setup_cmd[15: 8];
+wire [ 7:0] fu_cn    = ep00_setup_cmd[23:16];   // wValue low  : channel number
+wire [ 7:0] fu_cs    = ep00_setup_cmd[31:24];   // wValue high : control selector
+wire [ 7:0] fu_unit  = ep00_setup_cmd[47:40];   // wIndex high : addressed unit
+
+wire fu_get = (fu_rtype == 8'hA1) && (fu_unit == FU_ID);   // class, interface, device-to-host
+wire fu_set = (fu_rtype == 8'h21) && (fu_unit == FU_ID);   // class, interface, host-to-device
+
+reg         mute_master = 1'b0;
+reg  [15:0] volume      = VOL_DEF;
+
+wire [15:0] vol_sel = volume;
+
+// GET responses, indexed by ep00_resp_idx exactly like the descriptor ROM
+always @ (*) begin
+    ep00_resp = 8'h00;
+    if (fu_get) begin
+        if (fu_cs == CS_MUTE) begin
+            if (fu_req == REQ_GET_CUR)
+                ep00_resp = {7'h0, mute_master};
+        end else if (fu_cs == CS_VOLUME) begin
+            case (fu_req)
+                REQ_GET_CUR : ep00_resp = (ep00_resp_idx == 9'd0) ? vol_sel[7:0] : vol_sel[15:8];
+                REQ_GET_MIN : ep00_resp = (ep00_resp_idx == 9'd0) ? VOL_MIN[7:0] : VOL_MIN[15:8];
+                REQ_GET_MAX : ep00_resp = (ep00_resp_idx == 9'd0) ? VOL_MAX[7:0] : VOL_MAX[15:8];
+                REQ_GET_RES : ep00_resp = (ep00_resp_idx == 9'd0) ? VOL_RES[7:0] : VOL_RES[15:8];
+                default     : ep00_resp = 8'h00;
+            endcase
+        end
     end
+end
 
-always @ (posedge clk)
-    if (o_pcm_en & bufo_full_n)
-        bufo[bufo_wptr[8:0]] <= o_pcm;
-
-always @ (posedge clk)
-    bufo_rd <= bufo[bufo_rptr[8:0]];
-
+// SET_CUR consumes the control OUT data stage
 always @ (posedge clk or negedge usb_rstn)
     if (~usb_rstn) begin
-        bufo_rptr <= 10'h0;
-        audio_ro <= 16'h0;
-        audio_lo <= 16'h0;
-    end else begin
-        if (audio_en & bufo_empty_n) begin      // output a new audio data when 48kHz pulse and buffer is not empty, otherwise remain output audio data not change.
-            bufo_rptr <= bufo_rptr + 10'd1;
-            {audio_ro, audio_lo} <= bufo_rd;
+        mute_master <= 1'b0;
+        volume      <= VOL_DEF;
+    end else if (ep00_data_valid && fu_set && (fu_req == REQ_SET_CUR)) begin
+        if (fu_cs == CS_MUTE) begin
+            if (ep00_data_idx == 9'd0)
+                mute_master <= ep00_data_out[0];
+        end else if (fu_cs == CS_VOLUME) begin
+            if (ep00_data_idx == 9'd0) volume[ 7:0] <= ep00_data_out;
+            else                       volume[15:8] <= ep00_data_out;
         end
     end
 
 
 
 //-------------------------------------------------------------------------------------------------------------------------------------
-// audio input (device-to-host) : buffer. The goal is to convert the stable 48ksps audio input to the USB-packet-burst data.
+// audio output (host-to-device) : left-channel stream out to the FIFO Buffer (block 1.2)
+//   Samples are handed over as they are decoded, at the USB packet burst rate. Smoothing
+//   that burst into a steady 48 ksps stream is the FIFO Buffer's job - Figure 3 shows one
+//   buffer, and it is block 1.2. The 512-entry bufo array that used to sit here did the
+//   same work a second time, and was 92 % of the chip's sequential cells.
 //-------------------------------------------------------------------------------------------------------------------------------------
-reg [31:0] bufi [511:0];             // may automatically synthesize to BRAM
-reg [ 9:0] bufi_wptr = 10'h0;
-reg [ 9:0] bufi_rptr = 10'h0;
-reg [31:0] bufi_rd;
-wire bufi_full_n  = (bufi_wptr != {~bufi_rptr[9], bufi_rptr[8:0]});
-wire bufi_empty_n = (bufi_wptr != bufi_rptr);
+assign sof_out = sof;
 
-always @ (posedge clk or negedge usb_rstn)
-    if (~usb_rstn) begin
-        bufi_wptr <= 10'h0;
-    end else begin
-        if (audio_en & bufi_full_n)
-            bufi_wptr <= bufi_wptr + 10'd1;
-    end
-
-always @ (posedge clk)
-    if (audio_en & bufi_full_n)
-        bufi[bufi_wptr[8:0]] <= {audio_ri, audio_li};
-
-always @ (posedge clk)
-    bufi_rd <= bufi[bufi_rptr[8:0]];   // fetch data from buffer
-
-
-
-//-------------------------------------------------------------------------------------------------------------------------------------
-// audio input (device-to-host) : convert 2-channel-16-bit-PCM to byte stream
-//-------------------------------------------------------------------------------------------------------------------------------------
-reg [ 1:0] i_pcm_cnt = 2'h0;    // count from 0~3
-reg [ 5:0] i_pkt_cnt = 6'h0;    // count from 0~47, since each USB packet carries 48 PCM data (2 channel * 2 byte * 48 = 192 bytes each packet)
-
-always @ (posedge clk or negedge usb_rstn)
-    if (~usb_rstn) begin
-        bufi_rptr <= 10'h0;
-        i_pcm_cnt <= 2'h0;
-        i_pkt_cnt <= 6'h0;
-        in_valid <= 1'b0;
-    end else begin
-        if (sof) begin
-            i_pcm_cnt <= 2'h0;
-            i_pkt_cnt <= 6'h0;
-            in_valid <= 1'b1;
-        end else if (in_ready) begin
-            i_pcm_cnt <= i_pcm_cnt + 2'd1;
-            if (i_pcm_cnt == 2'd3) begin
-                if (i_pkt_cnt < 6'd47) begin
-                    i_pkt_cnt <= i_pkt_cnt + 6'd1;
-                    in_valid <= 1'b1;
-                end else begin
-                    in_valid <= 1'b0;
-                end
-                if (bufi_empty_n)
-                    bufi_rptr <= bufi_rptr + 10'd1;
-            end
-        end
-    end
-
-assign in_data = bufi_rd[ (i_pcm_cnt*8) +: 8 ];
-
-
-
-//-------------------------------------------------------------------------------------------------------------------------------------
-// audio output (host-to-device) : async FIFO bridge from USB 60 MHz domain to DAC domain
-//   Same write trigger as the audio_lo/audio_ro latch above. wr_data = bufo_rd is the
-//   exact 32-bit {right, left} sample being latched into audio_ro/audio_lo this cycle
-//-------------------------------------------------------------------------------------------------------------------------------------
-wire        fifo_wr_full;
-wire        fifo_wr_en   = audio_en & bufo_empty_n & ~fifo_wr_full;
-
-async_fifo #(
-    .DATA_WIDTH         ( 32                 ),
-    .ADDR_WIDTH         ( 4                  )    // 16-entry CDC bridge
-) u_async_fifo (
-    .wr_clk             ( clk                ),
-    .wr_rst_n           ( usb_rstn           ),
-    .wr_en              ( fifo_wr_en         ),
-    .wr_data            ( bufo_rd            ),
-    .wr_full            ( fifo_wr_full       ),
-    .rd_clk             ( fifo_rd_clk        ),
-    .rd_rst_n           ( fifo_rd_rstn       ),
-    .rd_en              ( fifo_rd_en         ),
-    .rd_data            ( fifo_rd_data       ),
-    .rd_empty           ( fifo_rd_empty      )
-);
+assign wr_en_l     = o_pcm_en;
+assign wr_commit_l = out_commit;
+assign wr_abort_l  = out_abort;
+assign data_l  = mute_master ? 16'h0000 : o_pcm;         // Mute Control gates the stream
 
 
 
@@ -231,48 +171,44 @@ async_fifo #(
 //-------------------------------------------------------------------------------------------------------------------------------------
 usbfs_core_top  #(
     .DESCRIPTOR_DEVICE  ( {  //  18 bytes available
-        144'h12_01_10_01_00_00_00_20_9A_FB_9A_FB_00_01_01_02_00_01
+        144'h12_01_00_02_00_00_00_20_9A_FB_9A_FB_00_01_01_02_00_01
     } ),
     .DESCRIPTOR_STR1    ( {  //  64 bytes available
-        352'h2C_03_67_00_69_00_74_00_68_00_75_00_62_00_2e_00_63_00_6f_00_6d_00_2f_00_57_00_61_00_6e_00_67_00_58_00_75_00_61_00_6e_00_39_00_35_00,  // "github.com/WangXuan95"
-        160'h0
+        160'h14_03_54_00_65_00_61_00_6D_00_20_00_58_00_4C_00_52_00_38_00,     // "Team XLR8"
+        352'h0
     } ),
     .DESCRIPTOR_STR2    ( {  //  64 bytes available
-        240'h1E_03_46_00_50_00_47_00_41_00_2d_00_55_00_53_00_42_00_2d_00_61_00_75_00_64_00_69_00_6f_00,                                            // "FPGA-USB-audio"
+        240'h1E_03_58_00_4C_00_52_00_38_00_20_00_55_00_53_00_42_00_20_00_41_00_75_00_64_00_69_00_6F_00,   // "XLR8 USB Audio"
         272'h0
     } ),
     .DESCRIPTOR_STR3    ( {  //  64 bytes available
-        288'h24_03_46_00_50_00_47_00_41_00_2d_00_55_00_53_00_42_00_2d_00_61_00_75_00_64_00_69_00_6f_00_2d_00_69_00_6e_00,                          // "FPGA-USB-audio-in"
-        224'h0
-    } ),
-    .DESCRIPTOR_STR4    ( {  //  64 bytes available
-        304'h26_03_46_00_50_00_47_00_41_00_2d_00_55_00_53_00_42_00_2d_00_61_00_75_00_64_00_69_00_6f_00_2d_00_6F_00_75_00_74_00,                    // "FPGA-USB-audio-out"
+        304'h26_03_58_00_4C_00_52_00_38_00_20_00_48_00_65_00_61_00_64_00_70_00_68_00_6F_00_6E_00_65_00_20_00_4F_00_75_00_74_00,   // "XLR8 Headphone Out"
         208'h0
     } ),
+    //-------------------------------------------------------------------------------------------------
+    // Configuration block: USB-IF Basic Audio Device, Headphone topology HT1 (BADD section 5).
+    //   Input Terminal ID1 (USB Streaming) -> Feature Unit ID2 -> Output Terminal ID3 (Headphones)
+    // Mono, because the chip drives one analog channel. Declaring stereo made the host send
+    // a right channel that was decoded and thrown away; mono halves the packet to 96 bytes and
+    // lets the host do the downmix, so both channels of the source are actually heard.
+    // wTotalLength = 111 = 9+9+41+9+9+7+11+9+7; class-specific AC block = 41 = 9+12+11+9.
+    //-------------------------------------------------------------------------------------------------
     .DESCRIPTOR_CONFIG  ( {  // 512 bytes available
-        72'h09_02_AE_00_03_01_00_80_64,            // configuration descriptor                    // ***bug fixed at 20230527. The previous version puts microphone and speaker into different compensite device, where the microphone cannot be recognized by Linux.
-        72'h09_04_00_00_00_01_01_00_02,            // interface descriptor, audio control (AC)
-        80'h0A_24_01_00_01_34_00_02_01_02,         // AC interface header descriptor
-        96'h0C_24_02_01_01_02_00_02_03_00_00_00,   // AC Input  terminal descriptor, microphone, ID=0x01, 2channel (stereo)
-        72'h09_24_03_02_01_01_03_01_03,            // AC Output terminal descriptor, USB-stream, ID=0x02, source from ID=0x01
-        96'h0C_24_02_03_01_01_02_02_03_00_00_04,   // AC Input  terminal descriptor, USB-stream, ID=0x03, 2channel (stereo)
-        72'h09_24_03_04_01_03_00_03_00,            // AC Output terminal descriptor, speaker   , ID=0x04, source from ID=0x03
-        72'h09_04_01_00_00_01_02_00_03,            // interface descriptor
-        72'h09_04_01_01_01_01_02_00_03,            // interface descriptor, audio streaming (AS)
-        56'h07_24_01_02_01_01_00,                  // AS interface descriptor, link to terminal ID=0x02, interface delay=0x01, PCM format
-        88'h0B_24_02_01_02_02_10_01_80_BB_00,      // AS format type descriptor, 2channel (stereo), 16bit 48000Hz
-        72'h09_05_82_01_C0_00_01_00_00,            // endpoint descriptor, endpoint 0x82, 0xC0=192=48*2*2 bytes per packet, one packet per frame (1frame = 1ms)
-        56'h07_25_01_00_00_00_00,                  // audio data endpoint descriptor
-        72'h09_04_02_00_00_01_02_00_04,            // interface descriptor
-        72'h09_04_02_01_01_01_02_00_04,            // interface descriptor, audio streaming (AS)
-        56'h07_24_01_03_01_01_00,                  // AS interface descriptor, link to terminal ID=0x03, interface delay=0x01, PCM format
-        88'h0B_24_02_01_02_02_10_01_80_BB_00,      // AS format type descriptor, 2channel (stereo), 16bit 48000Hz
-        72'h09_05_01_01_C0_00_01_00_00,            // endpoint descriptor, endpoint 0x01, 0xC0=192=48*2*2 bytes per packet, one packet per frame (1frame = 1ms)
-        56'h07_25_01_01_00_00_00,                  // audio data endpoint descriptor
-        2704'h0
+        72'h09_02_6F_00_02_01_00_80_32,               // configuration: 2 interfaces, bus powered, 100mA = one unit load (BADD 4.1)
+        72'h09_04_00_00_00_01_01_01_02,               // standard AC interface, 0 endpoints, bInterfaceProtocol=0x01 M_HP_HT1
+        72'h09_24_01_00_01_29_00_01_01,               // class-specific AC header, bcdADC=0x0100, wTotalLength=41, 1 streaming interface
+        96'h0C_24_02_01_01_01_00_01_04_00_00_00,      // Input  Terminal ID1, USB Streaming (0x0101), mono, Center Front
+        88'h0B_24_06_02_01_02_01_00_02_00_00,         // Feature Unit ID2 from ID1: Mute on Master, Volume on Center Front (BADD Table 5-5)
+        72'h09_24_03_03_02_03_00_02_00,               // Output Terminal ID3, Headphones (0x0302), sourced from ID2
+        72'h09_04_01_00_00_01_02_00_03,               // AS interface 1, alt 0: zero bandwidth (BADD 5.3.3.3.1)
+        72'h09_04_01_01_01_01_02_00_03,               // AS interface 1, alt 1: one isochronous endpoint
+        56'h07_24_01_01_00_01_00,                     // class-specific AS general: links Terminal ID1, bDelay=0, PCM
+        88'h0B_24_02_01_01_02_10_01_80_BB_00,         // type I format: mono, 2 byte subframe, 16 bit, 48000 Hz
+        72'h09_05_01_0D_60_00_01_00_00,               // endpoint 0x01 OUT, isochronous + synchronous (0x0D), 96 bytes, 1 per frame
+        56'h07_25_01_00_00_00_00,                     // class-specific isochronous endpoint, no controls (BADD Table 5-20)
+        3208'h0
     } ),
-    .EP82_MAXPKTSIZE    ( 10'hC0           ),    // USB packet length = 192 bytes = 2 channel * 2 byte * 48 PCM datas
-    .EP82_ISOCHRONOUS   ( 1                ),
+    .DESCRIPTOR_CONFIG_LEN ( 10'd111       ),
     .EP01_ISOCHRONOUS   ( 1                ),
     .DEBUG              ( DEBUG            )
 ) usbfs_core_i (
@@ -284,29 +220,16 @@ usbfs_core_top  #(
     .usb_rstn           ( usb_rstn         ),
     .sot                (                  ),
     .sof                ( sof              ),
-    .ep00_setup_cmd     (                  ),
-    .ep00_resp_idx      (                  ),
-    .ep00_resp          ( 8'h0             ),
-    .ep81_data          ( 8'h0             ),
-    .ep81_valid         ( 1'b0             ),
-    .ep81_ready         (                  ),
-    .ep82_data          ( in_data          ),
-    .ep82_valid         ( in_valid         ),
-    .ep82_ready         ( in_ready         ),
-    .ep83_data          ( 8'h0             ),
-    .ep83_valid         ( 1'b0             ),
-    .ep83_ready         (                  ),
-    .ep84_data          ( 8'h0             ),
-    .ep84_valid         ( 1'b0             ),
-    .ep84_ready         (                  ),
+    .ep00_setup_cmd     ( ep00_setup_cmd   ),
+    .ep00_resp_idx      ( ep00_resp_idx    ),
+    .ep00_resp          ( ep00_resp        ),
+    .ep00_data_out      ( ep00_data_out    ),
+    .ep00_data_valid    ( ep00_data_valid  ),
+    .ep00_data_idx      ( ep00_data_idx    ),
     .ep01_data          ( out_data         ),
     .ep01_valid         ( out_valid        ),
-    .ep02_data          (                  ),
-    .ep02_valid         (                  ),
-    .ep03_data          (                  ),
-    .ep03_valid         (                  ),
-    .ep04_data          (                  ),
-    .ep04_valid         (                  ),
+    .ep01_commit        ( out_commit       ),
+    .ep01_abort         ( out_abort        ),
     .debug_en           ( debug_en         ),
     .debug_data         ( debug_data       ),
     .debug_uart_tx      ( debug_uart_tx    )
