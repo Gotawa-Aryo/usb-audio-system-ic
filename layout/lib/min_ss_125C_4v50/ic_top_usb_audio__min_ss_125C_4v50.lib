@@ -31,52 +31,52 @@ library (ic_top_usb_audio) {
   }
 
   cell ("ic_top_usb_audio") {
-    area : 2017244.500 
+    area : 646708.688 
     is_macro_cell : true;
-    pin("bitstream_out") {
+    pin("DAC_MOD_OUT_L") {
       direction : output;
-      capacitance : 0.0008;
+      capacitance : 0.0024;
       timing() {
-        related_pin : "reset_n";
+        related_pin : "RESET_N";
         timing_sense : positive_unate;
         timing_type : combinational;
 	cell_rise(template_1) {
           index_1("0.00100,  0.00270,  0.00866,  0.02005,  0.03778,  0.06267,  0.09542,  0.13670,  0.18700,  0.24710");
-          values("9.55814,9.58834,9.68546,9.86378,10.13978,10.52678,11.03718,11.67958,12.46397,13.40078");
+          values("10.07138,10.10158,10.19871,10.37703,10.65303,11.04003,11.55039,12.19275,12.97732,13.91403");
 	}
 	rise_transition(template_1) {
           index_1("0.00100,  0.00270,  0.00866,  0.02005,  0.03778,  0.06267,  0.09542,  0.13670,  0.18700,  0.24710");
-          values("0.14692,0.19072,0.34468,0.65468,1.15000,1.84581,2.76281,3.91542,5.32338,7.00640");
+          values("0.14693,0.19073,0.34467,0.65467,1.15000,1.84572,2.76272,3.91515,5.32356,7.00636");
 	}
 	cell_fall(template_1) {
           index_1("0.00100,  0.00270,  0.00866,  0.02005,  0.03778,  0.06267,  0.09542,  0.13670,  0.18700,  0.24710");
-          values("9.28029,9.31329,9.40629,9.54829,9.74029,9.98829,10.30719,10.70529,11.19119,11.77029");
+          values("10.20053,10.23338,10.32635,10.46860,10.66035,10.90835,11.22735,11.62535,12.11135,12.69036");
 	}
 	fall_transition(template_1) {
           index_1("0.00100,  0.00270,  0.00866,  0.02005,  0.03778,  0.06267,  0.09542,  0.13670,  0.18700,  0.24710");
-          values("0.17456,0.20680,0.30566,0.47706,0.73694,1.11610,1.63490,2.29910,3.12159,4.10110");
+          values("0.17450,0.20685,0.30560,0.47720,0.73695,1.11600,1.63524,2.29924,3.12176,4.10124");
 	}
       }
     }
-    pin("clk60mhz") {
+    pin("RESET_N") {
       direction : input;
-      capacitance : 0.0037;
+      capacitance : 0.0039;
     }
-    pin("reset_n") {
+    pin("SYS_CLK_60M") {
       direction : input;
       capacitance : 0.0038;
     }
-    pin("usb_dn") {
+    pin("USB_DN") {
       direction : inout;
-      capacitance : 0.0926;
+      capacitance : 0.0862;
     }
-    pin("usb_dp") {
+    pin("USB_DP") {
       direction : inout;
-      capacitance : 0.0907;
+      capacitance : 0.0784;
     }
-    pin("usb_dp_pull") {
+    pin("USB_DP_PULL") {
       direction : output;
-      capacitance : 0.0024;
+      capacitance : 0.0015;
     }
   }
 
