@@ -18,7 +18,7 @@ project:
   description: "Single-chip USB-to-audio interface system consisting of USB interface (UAC 1.0) standard and DAC audio output."
   lvs_config: "lvs_config.json"
   gf_def_ready: true            # data ready for def generation with global foundries' pad frame
-  ws_def_ready: false           # data ready for def generation with wafer space pad frame
+  ws_def_ready: true            # data ready for def generation with wafer space pad frame
   drc_ready: false              # data ready for integration and DRC
   lvs_ready: false              # data ready for integrated LVS
 
